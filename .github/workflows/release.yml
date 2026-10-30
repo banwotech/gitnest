@@ -1,0 +1,87 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+            target: dmg
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+            target: dmg
+          - runner: windows-2022
+            platform: win
+            arch: x64
+            target: nsis
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            target: AppImage
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build installer
+        run: npx electron-builder --${{ matrix.platform }} ${{ matrix.target }} --${{ matrix.arch }} --publish never
+      - uses: actions/upload-artifact@v7
+        with:
+          name: GitNest-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: GitNest-*
+          merge-multiple: true
+          path: installers
+      - name: Create checksums
+        working-directory: installers
+        run: sha256sum GitNest-* > SHA256SUMS.txt
+      - name: Publish installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" installers/* --clobber
+          else
+            gh release create "$RELEASE_TAG" installers/* \
+              --draft --verify-tag --title "GitNest $RELEASE_TAG" \
+              --notes-file .github/release-notes.md
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest
