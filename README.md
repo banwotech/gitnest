@@ -2,10 +2,10 @@
   <img src="build/icon.png" alt="GitNest Logo" width="96" height="96">
 </p>
 
-<h1 align="center">GitNest</h1>
+<h3 align="center">GitNest</h3>
 
 <p align="center">
-  <strong>GitNest：为 AI 时代而生的 Git 版本管理软件。</strong>
+  <strong>为 AI 时代而生的 Git 版本管理软件</strong>
 </p>
 
 ## 为什么做这个工具
