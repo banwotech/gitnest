@@ -32,7 +32,7 @@
 | macOS（Apple 芯片） | 名称含 `mac-arm64` 的 `.dmg` |
 | macOS（Intel 芯片） | 名称含 `mac-x64` 的 `.dmg` |
 | Windows（64 位） | 名称含 `win-x64` 的 `.exe` |
-| Linux（64 位） | 名称含 `linux-x64` 的 `.AppImage` |
+| Linux（64 位） | 名称含 `linux-x86_64` 的 `.AppImage` |
 
 使用前请先安装 [Git](https://git-scm.com/downloads)。安装后打开 GitNest，选择你的项目文件夹即可；管理多个项目时，选择它们共同的父文件夹。
 
