@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, CaretUpDown, Check, Code, Folder, FolderOpen, GitBranch, Plus, SidebarSimple } from '@phosphor-icons/react';
-import type { Comparison, FileSection, GitAction, GitActionPayload, Project, RepositoryActionResult, Workspace, WorkspaceResult } from './types';
+import { ArrowRight, CaretUpDown, Check, Code, Folder, FolderOpen, GitBranch, GitCommit, Plus, SidebarSimple } from '@phosphor-icons/react';
+import type { AuthenticationRequest, Comparison, FileSection, GitAction, GitActionPayload, Project, RepositoryActionResult, Workspace, WorkspaceResult } from './types';
+import AuthenticationDialog from './components/AuthenticationDialog';
 import DiffView from './components/DiffView';
 import ChangesPanel from './components/ChangesPanel';
+import CommitHistory from './components/CommitHistory';
+import ResizableSplit from './components/ResizableSplit';
 import RepositoryActions from './components/RepositoryActions';
 import BranchActions from './components/BranchActions';
 import Toast, { type ToastMessage } from './components/Toast';
@@ -22,12 +25,17 @@ export default function App() {
   const [selectedSection, setSelectedSection] = useState<FileSection>('unstaged');
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [authentication, setAuthentication] = useState<AuthenticationRequest | null>(null);
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [comparisonFileKey, setComparisonFileKey] = useState('');
   const [comparing, setComparing] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [showRecent, setShowRecent] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [repositoryView, setRepositoryView] = useState<'working' | 'history'>('working');
+  const [historyOpened, setHistoryOpened] = useState(false);
+  const [historyControlsHost, setHistoryControlsHost] = useState<HTMLDivElement | null>(null);
   const [pendingAction, setPendingAction] = useState<{ repository: string; action: GitAction } | null>(null);
   const [commitMessages, setCommitMessages] = useState<Record<string, string>>({});
   const busy = useRef(false);
@@ -78,6 +86,7 @@ export default function App() {
   }, [applyWorkspace, showError]);
 
   useEffect(() => window.gitnest?.onChooseFolder(chooseFolder), [chooseFolder]);
+  useEffect(() => window.gitnest?.onAuthenticationRequired(setAuthentication), []);
 
   const refresh = useCallback(async () => {
     if (busy.current || mutating.current || !currentWorkspace.current) return;
@@ -132,6 +141,7 @@ export default function App() {
     window.gitnest.compare(project.path, file.path, source).then((next) => {
       if (request !== comparisonRequest.current) return;
       loadedComparisonKey.current = comparisonKey;
+      setComparisonFileKey(JSON.stringify([project.path, file.path, source]));
       setComparison((previous) => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
     }).catch((error) => {
       if (request === comparisonRequest.current) { setComparison(null); setComparisonError(messageOf(error)); }
@@ -172,6 +182,7 @@ export default function App() {
       }
       currentWorkspace.current = result.workspace;
       setWorkspace(result.workspace);
+      if (result.canceled) return false;
       if (result.error) { showError(`${repository.name}：${result.error}`); return false; }
       if (action === 'commit') setCommitMessages((messages) => ({ ...messages, [repository.path]: '' }));
       if ((action === 'stage' || action === 'unstage') && activeRepository.current === repository.path) {
@@ -190,10 +201,21 @@ export default function App() {
         {sidebarVisible && <Brand />}
         <button className="icon-button sidebar-toggle" title={sidebarVisible ? '隐藏侧边栏' : '展开侧边栏'} aria-label={sidebarVisible ? '隐藏侧边栏' : '展开侧边栏'} aria-expanded={sidebarVisible} aria-controls="workspace-sidebar" disabled={!workspace} onClick={() => { setSidebarVisible((visible) => !visible); setShowRecent(false); }}><SidebarSimple size={20} weight={sidebarVisible ? 'duotone' : 'regular'} /></button>
       </div>
-      {project && !loading && <RepositoryActions key={project.path} project={project} busy={Boolean(pendingAction)} pending={pendingAction?.repository === project.path ? pendingAction.action : null} message={commitMessages[project.path] ?? ''} onMessageChange={(message) => setCommitMessages((messages) => ({ ...messages, [project.path]: message }))} onAction={runAction} />}
-      {project && !loading && <BranchActions key={`branches:${project.path}`} project={project} busy={Boolean(pendingAction)} pending={pendingAction?.repository === project.path ? pendingAction.action : null} onAction={runAction} onError={showError} />}
+      {project && !loading && <div className="repository-view-switch" role="group" aria-label="仓库视图">
+        <button aria-pressed={repositoryView === 'working'} aria-controls="working-view" onClick={() => setRepositoryView('working')}><Code size={14} />工作区</button>
+        <button aria-pressed={repositoryView === 'history'} aria-controls="history-view" onClick={() => { setHistoryOpened(true); setRepositoryView('history'); }}><GitCommit size={14} />提交记录</button>
+      </div>}
+      {project && !loading && <div ref={setHistoryControlsHost} className="history-header-controls" hidden={repositoryView !== 'history'} />}
+      {project && !loading && <div className="repository-header-actions" hidden={repositoryView !== 'working'}>
+        <RepositoryActions key={project.path} project={project} busy={Boolean(pendingAction)} pending={pendingAction?.repository === project.path ? pendingAction.action : null} message={commitMessages[project.path] ?? ''} onMessageChange={(message) => setCommitMessages((messages) => ({ ...messages, [project.path]: message }))} onAction={runAction} />
+        <BranchActions key={`branches:${project.path}`} project={project} busy={Boolean(pendingAction)} pending={pendingAction?.repository === project.path ? pendingAction.action : null} onAction={runAction} onError={showError} />
+      </div>}
     </header>
     {toast && <Toast toast={toast} onDismiss={dismissToast} />}
+    {authentication && <AuthenticationDialog key={authentication.id} request={authentication} onRespond={async (credentials) => {
+      await window.gitnest.respondAuthentication(authentication.id, credentials);
+      setAuthentication((current) => current?.id === authentication.id ? null : current);
+    }} />}
     {loading ? <div className="loading-screen"><span className="spinner" />正在打开工作区…</div> : !workspace ? <main className="welcome">
       <span className="eyebrow">A LITTLE HOME FOR YOUR REPOSITORIES</span><Brand large /><h1>一个文件夹，<br />看见整个项目。</h1><p>前端、后端，还有每一次未提交的修改。<br />打开它们共同的父文件夹，从这里开始。</p><button className="button primary" onClick={chooseFolder}><FolderOpen size={20} />选择工作区文件夹<ArrowRight size={18} /></button><span className="welcome-note">支持普通文件夹 · 自动识别一级子仓库</span>
       {recent.length > 0 && <div className="welcome-recent"><span className="section-label">最近打开</span>{recent.map((folder) => <button key={folder} onClick={() => openRecent(folder)}><Folder size={17} /><span>{folder}</span><ArrowRight size={15} /></button>)}</div>}
@@ -212,10 +234,13 @@ export default function App() {
         <div className="sidebar-bottom"><div><span className="status-dot" />{repositories.length} 个仓库<span>·</span>{totalChanges} 个变更</div><p>仅扫描当前目录及一级子文件夹</p></div>
       </aside>
       <main className="main-area">
-        {project ? <div className="repository-layout">
+        {project ? <><div className="repository-view" id="working-view" hidden={repositoryView !== 'working'}>
+        <ResizableSplit className="repository-layout" direction="vertical" label="调整文件列表宽度" initialSize={268} minFirst={200} minSecond={400}>
           <ChangesPanel key={project.path} project={project} selectedFile={selectedFile} selectedSection={selectedSection} onSelectFile={(next, section) => { setSelectedFile(next.path); setSelectedSection(section); }} onAction={runAction} busy={Boolean(pendingAction)} />
-          <DiffView project={project} file={file} comparison={comparison} source={source} loading={comparing} error={comparisonError} stagingDisabled={!file || Boolean(pendingAction) || typeof window.gitnest?.stage !== 'function'} onToggleStage={() => { if (file) void runAction(selectedSection === 'staged' ? 'unstage' : 'stage', { paths: [file.path] }); }} />
-        </div> : <div className="empty-workspace"><FolderOpen size={40} weight="light" /><h3>这里还没有 Git 仓库</h3><p>选择包含前端、后端等独立 Git 仓库的父文件夹，<br />或直接打开一个 Git 仓库。</p><button className="button" onClick={chooseFolder}>选择其他文件夹<ArrowRight size={16} /></button></div>}
+          <DiffView project={project} file={file} comparison={comparison} comparisonKey={comparisonFileKey} source={source} loading={comparing} error={comparisonError} stagingDisabled={!file || Boolean(pendingAction) || typeof window.gitnest?.stage !== 'function'} onToggleStage={() => { if (file) void runAction(selectedSection === 'staged' ? 'unstage' : 'stage', { paths: [file.path] }); }} />
+        </ResizableSplit></div>
+        <div className="repository-view" id="history-view" hidden={repositoryView !== 'history'}>{historyOpened && <CommitHistory key={project.path} project={project} active={repositoryView === 'history'} controlsHost={historyControlsHost} onError={showError} />}</div>
+        </> : <div className="empty-workspace"><FolderOpen size={40} weight="light" /><h3>这里还没有 Git 仓库</h3><p>选择包含前端、后端等独立 Git 仓库的父文件夹，<br />或直接打开一个 Git 仓库。</p><button className="button" onClick={chooseFolder}>选择其他文件夹<ArrowRight size={16} /></button></div>}
       </main>
     </div>}
   </div>;

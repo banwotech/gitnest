@@ -19,7 +19,7 @@ export default function Toast({ toast, onDismiss }: { toast: ToastMessage; onDis
   }, [toast, onDismiss]);
 
   return createPortal(<div className={`toast toast-${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'}>
-    {toast.kind === 'error' ? <WarningCircle size={19} /> : <CheckCircle size={19} />}
+    {toast.kind === 'error' ? <WarningCircle size={19} /> : <CheckCircle size={20} weight="fill" className="toast-success-icon" />}
     <span>{toast.message}</span>
     <button className="icon-button" aria-label="关闭提示" onClick={onDismiss}><X size={14} /></button>
   </div>, host);

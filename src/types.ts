@@ -42,16 +42,21 @@ export interface Comparison {
   original: string;
   modified: string;
   head: string | null;
-  source: 'working' | 'staged';
+  source: 'working' | 'staged' | 'commit';
+  base?: string | null;
   kind: 'text' | 'binary' | 'unsupported';
   message: string | null;
 }
 
 export interface WorkspaceResult { workspace: Workspace | null; recent: string[] }
-export interface RepositoryActionResult { workspace: Workspace; message: string | null; error: string | null }
+export interface RepositoryActionResult { workspace: Workspace; message: string | null; error: string | null; canceled?: boolean }
+export interface GitCredentials { username: string; password: string; remember: boolean }
+export interface AuthenticationRequest { id: string; repository: string; action: 'pull' | 'push'; url: string; username: string; usernameLocked: boolean; error: string | null; remember: boolean }
 export interface Commit { id: string; shortId: string; subject: string; author: string; date: string; refs: string }
 export interface CommitQuery { ref?: string; query?: string; offset?: number }
 export interface CommitPage { commits: Commit[]; hasMore: boolean }
+export interface CommittedFile extends ChangedFile { additions: number | null; deletions: number | null }
+export interface CommitDetail extends Commit { message: string; parents: string[]; parent: string | null; files: CommittedFile[]; additions: number; deletions: number }
 export type FileSection = 'unstaged' | 'staged';
 export type GitAction = 'stage' | 'unstage' | 'commit' | 'pull' | 'push' | 'switch' | 'createBranch' | 'deleteBranch' | 'merge' | 'abortMerge';
 export interface GitActionPayload { paths?: string[]; message?: string; remote?: string; branch?: string; name?: string; checkout?: boolean; force?: boolean; commit?: string; expectedHead?: string; noFastForward?: boolean }
@@ -60,15 +65,19 @@ declare global {
   interface Window {
     gitnest: {
       platform: string;
+      onAuthenticationRequired(callback: (request: AuthenticationRequest) => void): () => void;
+      respondAuthentication(id: string, credentials: GitCredentials | null): Promise<void>;
       getFullscreen(): Promise<boolean>;
       onFullscreenChange(callback: (fullscreen: boolean) => void): () => void;
       initialize(): Promise<WorkspaceResult>;
       chooseFolder(): Promise<WorkspaceResult | null>;
       openRecent(path: string): Promise<WorkspaceResult>;
       refresh(): Promise<Workspace | null>;
-      compare(repository: string, file: string, source?: Comparison['source']): Promise<Comparison>;
+      compare(repository: string, file: string, source?: 'working' | 'staged'): Promise<Comparison>;
       switchBranch(repository: string, branch: string): Promise<RepositoryActionResult>;
       readCommits(repository: string, options?: CommitQuery): Promise<CommitPage>;
+      readCommitDetail(repository: string, commitId: string, parentId?: string | null): Promise<CommitDetail>;
+      compareCommit(repository: string, commitId: string, filePath: string, parentId?: string | null): Promise<Comparison>;
       createBranch(repository: string, name: string, checkout?: boolean): Promise<RepositoryActionResult>;
       deleteBranch(repository: string, branch: string, force?: boolean): Promise<RepositoryActionResult>;
       merge(repository: string, commit: string, expectedHead: string, branch: string, noFastForward?: boolean): Promise<RepositoryActionResult>;

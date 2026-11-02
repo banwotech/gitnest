@@ -1,0 +1,167 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, symlink, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { scanWorkspace, readCommitDetail, readCommitComparison } from '../electron/git.mjs';
+
+const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const commit = (directory, message) => { git(directory, 'add', '.'); git(directory, 'commit', '-m', message); return git(directory, 'rev-parse', 'HEAD'); };
+async function fixture(t) {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'gitnest-history-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.name', 'History Test');
+  git(root, 'config', 'user.email', 'history@gitnest.local');
+  git(root, 'config', 'commit.gpgsign', 'false');
+  return { root, repository: { path: root } };
+}
+
+test('first commit has an empty base and preserves full message, paths and file content', async (t) => {
+  const { root, repository } = await fixture(t);
+  await mkdir(path.join(root, 'src'));
+  const name = 'src/新 文件\tname.ts';
+  const content = 'export const first = true;\nexport const second = true;\n';
+  await writeFile(path.join(root, name), content);
+  const id = commit(root, 'Initial commit\n\nKeep the full commit body.');
+  const detail = await readCommitDetail(repository, id);
+  assert.equal(detail.parent, null);
+  assert.deepEqual(detail.parents, []);
+  assert.equal(detail.message, 'Initial commit\n\nKeep the full commit body.');
+  assert.equal(detail.files[0].path, name);
+  assert.equal(detail.files[0].kind, 'added');
+  assert.equal(detail.additions, 2);
+  assert.equal(detail.deletions, 0);
+  const comparison = await readCommitComparison(repository, id, name);
+  assert.equal(comparison.original, '');
+  assert.equal(comparison.modified, content);
+  assert.equal(comparison.source, 'commit');
+  assert.equal(comparison.base, null);
+  assert.equal(comparison.head, id);
+});
+
+test('historical comparison uses the selected commit and its parent while preserving HEAD, index and disk', async (t) => {
+  const { root, repository } = await fixture(t);
+  const original = Array.from({ length: 150 }, (_, index) => `line ${index + 1}`).join('\n') + '\n';
+  await writeFile(path.join(root, 'long.txt'), original);
+  const initial = commit(root, 'Initial');
+  const selectedContent = original.replace('line 75\n', 'line 75 selected\n');
+  await writeFile(path.join(root, 'long.txt'), selectedContent);
+  const selected = commit(root, 'Selected historical change');
+  await writeFile(path.join(root, 'long.txt'), 'new HEAD\n');
+  const head = commit(root, 'Later commit');
+  await writeFile(path.join(root, 'long.txt'), 'staged\n');
+  git(root, 'add', 'long.txt');
+  await writeFile(path.join(root, 'long.txt'), 'working\n');
+  const indexBefore = await readFile(path.join(root, '.git', 'index'));
+  const statusBefore = git(root, 'status', '--porcelain=v2');
+  const detail = await readCommitDetail(repository, selected);
+  assert.equal(detail.parent, initial);
+  assert.equal(detail.additions, 1);
+  assert.equal(detail.deletions, 1);
+  const comparison = await readCommitComparison(repository, selected, 'long.txt');
+  assert.equal(comparison.original, original);
+  assert.equal(comparison.modified, selectedContent);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), head);
+  assert.deepEqual(await readFile(path.join(root, '.git', 'index')), indexBefore);
+  assert.equal(await readFile(path.join(root, 'long.txt'), 'utf8'), 'working\n');
+  assert.equal(git(root, 'status', '--porcelain=v2'), statusBefore);
+});
+
+test('historical rename, deletion, binary, symlink and unusual file names compare correctly', async (t) => {
+  const { root, repository } = await fixture(t);
+  const oldContent = 'const unchanged = true;\nconst version = 1;\nexport { unchanged, version };\n';
+  await writeFile(path.join(root, 'old name.ts'), oldContent);
+  await writeFile(path.join(root, 'deleted.txt'), 'removed content\n');
+  await symlink('/tmp/history-old-target', path.join(root, 'link'));
+  commit(root, 'Initial');
+  git(root, 'mv', 'old name.ts', 'new 文件.ts');
+  await writeFile(path.join(root, 'new 文件.ts'), oldContent.replace('version = 1', 'version = 2'));
+  await unlink(path.join(root, 'deleted.txt'));
+  await unlink(path.join(root, 'link'));
+  await symlink('/tmp/history-new-target', path.join(root, 'link'));
+  await writeFile(path.join(root, 'binary.bin'), Buffer.from([0, 1, 2]));
+  const unusual = 'tab\tand\nnewline.txt';
+  await writeFile(path.join(root, unusual), 'unusual path\n');
+  const selected = commit(root, 'Rename and other changes');
+  const detail = await readCommitDetail(repository, selected);
+  const renamed = detail.files.find((file) => file.path === 'new 文件.ts');
+  assert.equal(renamed.kind, 'renamed');
+  assert.equal(renamed.originalPath, 'old name.ts');
+  assert.equal(renamed.additions, 1);
+  assert.equal(renamed.deletions, 1);
+  const comparison = await readCommitComparison(repository, selected, renamed.path);
+  assert.equal(comparison.original, oldContent);
+  assert.equal(comparison.modified, oldContent.replace('version = 1', 'version = 2'));
+  const deleted = await readCommitComparison(repository, selected, 'deleted.txt');
+  assert.equal(deleted.original, 'removed content\n');
+  assert.equal(deleted.modified, '');
+  assert.equal(detail.files.find((file) => file.path === 'binary.bin').additions, null);
+  assert.equal((await readCommitComparison(repository, selected, 'binary.bin')).kind, 'binary');
+  const link = await readCommitComparison(repository, selected, 'link');
+  assert.equal(link.original, '/tmp/history-old-target');
+  assert.equal(link.modified, '/tmp/history-new-target');
+  assert.equal((await readCommitComparison(repository, selected, unusual)).modified, 'unusual path\n');
+});
+
+test('merge commits default to the first parent and allow only their actual parents', async (t) => {
+  const { root, repository } = await fixture(t);
+  await writeFile(path.join(root, 'base.txt'), 'base\n');
+  const base = commit(root, 'Base');
+  git(root, 'checkout', '-b', 'feature');
+  await writeFile(path.join(root, 'feature.txt'), 'feature\n');
+  const feature = commit(root, 'Feature');
+  git(root, 'checkout', 'main');
+  await writeFile(path.join(root, 'main.txt'), 'main\n');
+  const main = commit(root, 'Main');
+  git(root, 'merge', '--no-ff', 'feature', '-m', 'Merge feature');
+  const id = git(root, 'rev-parse', 'HEAD');
+  const first = await readCommitDetail(repository, id);
+  assert.deepEqual(first.parents, [main, feature]);
+  assert.equal(first.parent, main);
+  assert.deepEqual(first.files.map((file) => file.path), ['feature.txt']);
+  const second = await readCommitDetail(repository, id, feature);
+  assert.deepEqual(second.files.map((file) => file.path), ['main.txt']);
+  const comparison = await readCommitComparison(repository, id, 'main.txt', feature);
+  assert.equal(comparison.base, feature);
+  assert.equal(comparison.original, '');
+  assert.equal(comparison.modified, 'main\n');
+  await assert.rejects(() => readCommitDetail(repository, id, base), /父提交/);
+  await assert.rejects(() => readCommitDetail(repository, id, null), /父提交/);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), id);
+});
+
+test('empty commits and unsupported committed files are explicit, and invalid requests are rejected', async (t) => {
+  const { root, repository } = await fixture(t);
+  await writeFile(path.join(root, 'large.txt'), 'x'.repeat(5 * 1024 * 1024 + 1));
+  const first = commit(root, 'Large file');
+  assert.equal((await readCommitComparison(repository, first, 'large.txt')).kind, 'unsupported');
+  git(root, 'update-index', '--add', '--cacheinfo', `160000,${first},vendor`);
+  git(root, 'commit', '-m', 'Submodule');
+  const submodule = git(root, 'rev-parse', 'HEAD');
+  assert.equal((await readCommitComparison(repository, submodule, 'vendor')).kind, 'unsupported');
+  git(root, 'commit', '--allow-empty', '-m', 'Empty change');
+  const empty = git(root, 'rev-parse', 'HEAD');
+  assert.deepEqual((await readCommitDetail(repository, empty)).files, []);
+  await assert.rejects(() => readCommitComparison(repository, empty, '../outside'), /不在这次提交/);
+  for (const invalid of ['HEAD', '--help', '', undefined]) await assert.rejects(() => readCommitDetail(repository, invalid), /有效的提交/);
+  const blob = git(root, 'rev-parse', `${first}:large.txt`);
+  await assert.rejects(() => readCommitDetail(repository, blob));
+  assert.equal((await scanWorkspace(root)).projects[0].head, empty);
+});
+
+test('a shallow boundary is not mistaken for a root commit with all files added', async (t) => {
+  const { root } = await fixture(t);
+  await writeFile(path.join(root, 'file.txt'), 'initial\n');
+  commit(root, 'Initial');
+  await writeFile(path.join(root, 'file.txt'), 'selected\n');
+  const selected = commit(root, 'Selected');
+  const shallowRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'gitnest-history-shallow-')));
+  t.after(() => rm(shallowRoot, { recursive: true, force: true }));
+  git(shallowRoot, 'clone', '--depth=1', `file://${root}`, 'repo');
+  const repository = { path: path.join(shallowRoot, 'repo') };
+  assert.equal(git(repository.path, 'rev-parse', '--is-shallow-repository'), 'true');
+  await assert.rejects(() => readCommitDetail(repository, selected), /本地缺少父提交/);
+  await assert.rejects(() => readCommitComparison(repository, selected, 'file.txt'), /本地缺少父提交/);
+});

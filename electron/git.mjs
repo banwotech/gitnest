@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify, TextDecoder } from 'node:util';
 import { readdir, realpath, lstat, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
+import { runWithAuthentication } from './authentication.mjs';
 
 const exec = promisify(execFile);
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
@@ -145,6 +146,85 @@ export async function readCommits(repository, { ref = '', query = '', offset = 0
   return { commits: commits.slice(0, 50), hasMore: commits.length > 50 };
 }
 
+export async function readCommitDetail(repository, commitId, parentId) {
+  if (typeof commitId !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commitId)) throw new Error('请选择有效的提交。');
+  const revision = (await git(repository.path, ['rev-parse', '--verify', `${commitId}^{commit}`])).trim();
+  const [output, rawCommit] = await Promise.all([
+    git(repository.path, ['show', '--no-patch', '--no-show-signature', '--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%D%x00%B', revision, '--']),
+    git(repository.path, ['cat-file', 'commit', revision]),
+  ]);
+  const [id, shortId, subject, author, date, refs, message] = output.split('\0');
+  // Revision traversal hides parents at shallow boundaries; the commit object retains them.
+  const parents = rawCommit.split('\n\n', 1)[0].split('\n').filter((line) => line.startsWith('parent ')).map((line) => line.slice(7));
+  const parent = parentId === undefined ? parents[0] ?? null : parentId;
+  if ((parent !== null && !parents.includes(parent)) || (parent === null && parents.length)) throw new Error('请选择这次提交的父提交。');
+  if (parent) {
+    try { await git(repository.path, ['cat-file', '-e', `${parent}^{commit}`]); }
+    catch { throw new Error(`本地缺少父提交 ${parent.slice(0, 7)}，无法计算这次提交的变更。请补齐仓库历史后重试。`); }
+  }
+  const revisions = parent ? ['diff', parent, id] : ['diff-tree', '--root', '--no-commit-id', '-r', id];
+  const [names, numbers] = await Promise.all([
+    git(repository.path, [...revisions, '--no-ext-diff', '--no-textconv', '--find-renames', '--name-status', '-z', '--']),
+    git(repository.path, [...revisions, '--no-ext-diff', '--no-textconv', '--find-renames', '--numstat', '-z', '--']),
+  ]);
+  const statistics = new Map();
+  const numberRecords = numbers.split('\0');
+  for (let index = 0; index < numberRecords.length; index++) {
+    const record = numberRecords[index];
+    if (!record) continue;
+    const firstTab = record.indexOf('\t');
+    const secondTab = record.indexOf('\t', firstTab + 1);
+    let filePath = record.slice(secondTab + 1);
+    if (!filePath) { index++; filePath = numberRecords[++index]; }
+    const added = record.slice(0, firstTab), deleted = record.slice(firstTab + 1, secondTab);
+    statistics.set(filePath, { additions: added === '-' ? null : Number(added), deletions: deleted === '-' ? null : Number(deleted) });
+  }
+  const files = [];
+  const records = names.split('\0');
+  for (let index = 0; index < records.length; index++) {
+    const status = records[index];
+    if (!status) continue;
+    const renamed = status.startsWith('R') || status.startsWith('C');
+    const originalPath = renamed ? records[++index] : null;
+    const filePath = records[++index];
+    files.push({
+      path: filePath, originalPath, indexStatus: status[0], worktreeStatus: '.',
+      kind: renamed ? 'renamed' : status === 'A' ? 'added' : status === 'D' ? 'deleted' : 'modified',
+      staged: false, unstaged: false, submodule: false,
+      ...statistics.get(filePath),
+    });
+  }
+  return { id, shortId, subject, author, date, refs, message: message.trimEnd(), parents, parent, files,
+    additions: files.reduce((sum, file) => sum + (file.additions ?? 0), 0),
+    deletions: files.reduce((sum, file) => sum + (file.deletions ?? 0), 0) };
+}
+
+async function readCommitBlob(repositoryPath, revision, filePath) {
+  if (!revision) return { kind: 'text', content: '', message: null };
+  const tree = await git(repositoryPath, ['ls-tree', '-z', revision, '--', filePath]);
+  if (!tree) return { kind: 'text', content: '', message: null };
+  const [mode, type, oid] = tree.slice(0, tree.indexOf('\t')).split(' ');
+  if (mode === '160000' || type === 'commit') return { kind: 'unsupported', content: '', message: '这是一个 Git 子模块，暂不支持文本对比。' };
+  if (type !== 'blob') return { kind: 'unsupported', content: '', message: '此路径不是普通文件，无法显示文本差异。' };
+  if (Number((await git(repositoryPath, ['cat-file', '-s', oid])).trim()) > MAX_FILE_SIZE) return { kind: 'unsupported', content: '', message: '此文件超过 5 MB，暂不支持完整文件对比。' };
+  const buffer = await git(repositoryPath, ['cat-file', 'blob', oid], { encoding: 'buffer', maxBuffer: MAX_FILE_SIZE + 1024 });
+  const content = decode(buffer);
+  return content === null ? { kind: 'binary', content: '', message: '此文件是二进制文件或非 UTF-8 文本，暂不支持文本对比。' } : { kind: 'text', content, message: null };
+}
+
+export async function readCommitComparison(repository, commitId, filePath, parentId) {
+  const detail = await readCommitDetail(repository, commitId, parentId);
+  const file = detail.files.find((item) => item.path === filePath);
+  if (!file) throw new Error('该文件不在这次提交的变更中。');
+  const [original, modified] = await Promise.all([
+    file.kind === 'added' ? { kind: 'text', content: '', message: null } : readCommitBlob(repository.path, detail.parent, file.originalPath ?? file.path),
+    file.kind === 'deleted' ? { kind: 'text', content: '', message: null } : readCommitBlob(repository.path, detail.id, file.path),
+  ]);
+  const unsupported = [original, modified].find((version) => version.kind === 'unsupported') ?? [original, modified].find((version) => version.kind === 'binary');
+  return { path: file.path, originalPath: file.originalPath, original: original.content, modified: modified.content,
+    head: detail.id, base: detail.parent, source: 'commit', kind: unsupported?.kind ?? 'text', message: unsupported?.message ?? null };
+}
+
 function decode(buffer) {
   if (buffer.includes(0)) return null;
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer); }
@@ -215,7 +295,7 @@ function selectedPaths(repository, payload, section) {
   return [...paths];
 }
 
-export async function performRepositoryAction(repository, action, payload = {}) {
+export async function performRepositoryAction(repository, action, payload = {}, operationOptions = {}) {
   try {
     const current = await inspectProject(repository.path);
     if (!current.isRepository) throw new Error(current.error ?? '该文件夹已不再是 Git 仓库。');
@@ -303,13 +383,26 @@ export async function performRepositoryAction(repository, action, payload = {}) 
         const remote = payload.remote;
         if (typeof remote !== 'string' || !current.remotes.includes(remote)) throw new Error('请选择该仓库中已配置的远程仓库。');
         const target = remote === current.upstreamRemote && current.upstreamBranch ? current.upstreamBranch : `refs/heads/${current.branchName}`;
+        const runRemote = (args) => runWithAuthentication({
+          repository: current.name, action, requestCredentials: operationOptions.requestCredentials,
+          remoteURL: () => git(current.path, ['remote', 'get-url', ...(action === 'push' ? ['--push'] : []), remote]),
+          saveCredentials: async (url, credentials) => {
+            const context = `url=${url}\nusername=${credentials.username}\n`;
+            await git(current.path, ['credential', 'approve'], { input: `${context}password=${credentials.password}\n\n` });
+            const saved = await git(current.path, ['-c', 'core.askPass=', 'credential', 'fill'], {
+              input: `${context}\n`, env: { ...gitEnv, GIT_ASKPASS: '', SSH_ASKPASS: '' },
+            });
+            if (!saved.split('\n').includes(`password=${credentials.password}`)) throw new Error('Git 凭据存储没有保存成功，请检查凭据存储设置。');
+          },
+          run: ({ config = [], env = {} } = {}) => git(current.path, [...config, ...args], { timeout: 120000, env: { ...gitEnv, ...env } }),
+        });
         if (action === 'pull') {
-          await git(current.path, ['pull', '--ff-only', '--no-rebase', '--', remote, target], { timeout: 120000 });
+          await runRemote(['pull', '--ff-only', '--no-rebase', '--', remote, target]);
           return '拉取完成';
         }
         if (!current.head) throw new Error('这个仓库还没有提交，请先提交再推送。');
         const options = remote === current.upstreamRemote && current.upstreamBranch ? [] : ['--set-upstream'];
-        await git(current.path, ['push', ...options, '--', remote, `HEAD:${target}`], { timeout: 120000 });
+        await runRemote(['push', ...options, '--', remote, `HEAD:${target}`]);
         return '推送完成';
       }
       default: throw new Error('不支持的 Git 操作。');

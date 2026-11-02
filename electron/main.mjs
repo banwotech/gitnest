@@ -2,7 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanWorkspace, readComparison, readCommits, performRepositoryAction } from './git.mjs';
+import { randomUUID } from 'node:crypto';
+import { scanWorkspace, readComparison, readCommits, readCommitDetail, readCommitComparison, performRepositoryAction } from './git.mjs';
+import { AuthenticationCancelledError, validateCredentials } from './authentication.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 app.setName('GitNest');
@@ -12,6 +14,23 @@ let window;
 let workspace = null;
 let settings = { recent: [], lastWorkspace: null };
 let operation = Promise.resolve();
+let pendingAuthentication = null;
+
+function cancelAuthentication() {
+  pendingAuthentication?.resolve(null);
+  pendingAuthentication = null;
+}
+
+function requestCredentials(details) {
+  if (!window || window.isDestroyed()) return Promise.resolve(null);
+  cancelAuthentication();
+  return new Promise((resolve) => {
+    const id = randomUUID();
+    pendingAuthentication = { id, resolve };
+    window.webContents.send('authentication:required', { id, ...details });
+    window.show(); window.focus();
+  });
+}
 
 async function loadSettings() {
   try {
@@ -62,6 +81,13 @@ function queueWorkspace(callback) {
 }
 
 function registerHandlers() {
+  handle('authentication:respond', (id, credentials) => {
+    if (!pendingAuthentication || pendingAuthentication.id !== id) throw new Error('认证请求已结束，请重新操作。');
+    if (credentials !== null) validateCredentials(credentials);
+    const { resolve } = pendingAuthentication;
+    pendingAuthentication = null;
+    resolve(credentials === null ? null : { username: credentials.username, password: credentials.password, remember: Boolean(credentials.remember) });
+  });
   handle('window:is-fullscreen', () => window.isFullScreen());
   handle('workspace:initialize', () => queueWorkspace(async () => {
     const initial = process.argv.find((arg) => arg.startsWith('--workspace='))?.slice(12) ?? settings.lastWorkspace;
@@ -90,12 +116,18 @@ function registerHandlers() {
     const repository = repositoryFor(repositoryPath);
     let message = null;
     let error = null;
-    try { message = await performRepositoryAction(repository, action, payload); }
-    catch (failure) { error = failure.message; }
+    let canceled = false;
+    try { message = await performRepositoryAction(repository, action, payload, { requestCredentials }); }
+    catch (failure) {
+      if (failure instanceof AuthenticationCancelledError) canceled = true;
+      else error = failure.message;
+    }
     workspace = await scanWorkspace(workspace.path);
-    return { workspace, message, error };
+    return { workspace, message, error, canceled };
   }));
   handle('repository:commits', (repositoryPath, options) => readCommits(repositoryFor(repositoryPath), options));
+  handle('repository:commit-detail', (repositoryPath, commitId, parentId) => readCommitDetail(repositoryFor(repositoryPath), commitId, parentId));
+  handle('file:commit-compare', (repositoryPath, commitId, filePath, parentId) => readCommitComparison(repositoryFor(repositoryPath), commitId, filePath, parentId));
   handle('file:reveal', (repositoryPath, filePath) => {
     const repository = repositoryFor(repositoryPath);
     if (filePath) {
@@ -114,6 +146,9 @@ function createWindow() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event) => event.preventDefault());
+  window.webContents.on('did-start-loading', cancelAuthentication);
+  window.webContents.on('render-process-gone', cancelAuthentication);
+  window.on('closed', cancelAuthentication);
   const notifyFullscreen = () => window.webContents.send('window:fullscreen-changed', window.isFullScreen());
   window.on('enter-full-screen', notifyFullscreen);
   window.on('leave-full-screen', notifyFullscreen);

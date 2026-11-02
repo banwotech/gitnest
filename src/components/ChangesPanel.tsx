@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, GitCommit, MagnifyingGlass, X } from '@phosphor-icons/react';
 import type { ChangedFile, FileSection, GitAction, GitActionPayload, Project } from '../types';
 import FileIcon from './FileIcon';
+import ResizableSplit from './ResizableSplit';
 import { isFileInSection } from '../fileStatus';
 
 const kindLabel: Record<ChangedFile['kind'], string> = { modified: '已修改', added: '已新增', deleted: '已删除', renamed: '已重命名', untracked: '未跟踪', conflict: '有冲突' };
@@ -29,7 +30,7 @@ export default function ChangesPanel({ project, selectedFile, selectedSection, o
 
   return <section className="changes-panel" aria-label="变更文件">
     <label className="search-box"><MagnifyingGlass size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件…" aria-label="搜索变更文件" />{query && <button className="icon-button" aria-label="清除搜索" onClick={() => setQuery('')}><X size={13} /></button>}</label>
-    <div className="file-groups">
+    <ResizableSplit className="file-groups" direction="horizontal" label="调整未暂存和已暂存区域高度" minFirst={90} minSecond={90}>
       {(['unstaged', 'staged'] as const).map((section) => {
         const staged = section === 'staged';
         const files = staged ? stagedFiles : unstagedFiles;
@@ -50,8 +51,8 @@ export default function ChangesPanel({ project, selectedFile, selectedSection, o
             {!visible.length && <div className="files-empty">{query ? '没有匹配的文件' : <><Check size={20} /><span>{staged ? '暂无已暂存文件' : '没有未暂存的修改'}</span></>}</div>}
           </div>
         </section>;
-      })}
-    </div>
+      }) as [React.ReactNode, React.ReactNode]}
+    </ResizableSplit>
     {project.commit && <div className="commit-summary" title={`${project.commit.subject}\n${project.commit.author} · ${project.commit.date}`}><GitCommit size={14} /><code>{project.head?.slice(0, 7)}</code><span>{project.commit.subject}</span></div>}
   </section>;
 }

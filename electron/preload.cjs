@@ -8,6 +8,12 @@ const invoke = async (channel, ...args) => {
 
 contextBridge.exposeInMainWorld('gitnest', {
   platform: process.platform,
+  respondAuthentication: (id, credentials) => invoke('authentication:respond', id, credentials),
+  onAuthenticationRequired: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('authentication:required', listener);
+    return () => ipcRenderer.removeListener('authentication:required', listener);
+  },
   getFullscreen: () => invoke('window:is-fullscreen'),
   onFullscreenChange: (callback) => {
     const listener = (_event, fullscreen) => callback(fullscreen);
@@ -21,6 +27,8 @@ contextBridge.exposeInMainWorld('gitnest', {
   compare: (repository, file, source) => invoke('file:compare', repository, file, source),
   switchBranch: (repository, branch) => invoke('repository:action', repository, 'switch', { branch }),
   readCommits: (repository, options) => invoke('repository:commits', repository, options),
+  readCommitDetail: (repository, commitId, parentId) => invoke('repository:commit-detail', repository, commitId, parentId),
+  compareCommit: (repository, commitId, filePath, parentId) => invoke('file:commit-compare', repository, commitId, filePath, parentId),
   createBranch: (repository, name, checkout) => invoke('repository:action', repository, 'createBranch', { name, checkout }),
   deleteBranch: (repository, branch, force) => invoke('repository:action', repository, 'deleteBranch', { branch, force }),
   merge: (repository, commit, expectedHead, branch, noFastForward) => invoke('repository:action', repository, 'merge', { commit, expectedHead, branch, noFastForward }),
