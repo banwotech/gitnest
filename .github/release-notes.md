@@ -13,10 +13,10 @@ GitNest：为 AI 时代而生的 Git 版本管理软件。
 
 | 系统 | 文件名 |
 | --- | --- |
-| macOS（Apple 芯片） | `GitNest-0.1.1-mac-arm64.dmg` |
-| macOS（Intel 芯片） | `GitNest-0.1.1-mac-x64.dmg` |
-| Windows（64 位） | `GitNest-0.1.1-win-x64.exe` |
-| Linux（64 位） | `GitNest-0.1.1-linux-x86_64.AppImage` |
+| macOS（Apple 芯片） | `GitNest-0.2.0-mac-arm64.dmg` |
+| macOS（Intel 芯片） | `GitNest-0.2.0-mac-x64.dmg` |
+| Windows（64 位） | `GitNest-0.2.0-win-x64.exe` |
+| Linux（64 位） | `GitNest-0.2.0-linux-x86_64.AppImage` |
 
 使用前请先安装 [Git](https://git-scm.com/downloads)。macOS 打开 DMG 后，将 GitNest 拖入「应用程序」；Windows 运行安装程序；Linux 为 AppImage 添加可执行权限后打开。
 
