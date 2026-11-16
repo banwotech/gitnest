@@ -3,18 +3,30 @@ import { promisify, TextDecoder } from 'node:util';
 import { readdir, realpath, lstat, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 import { runWithAuthentication } from './authentication.mjs';
+import { currentPathWithFallbacks, readLoginShellEnvironment } from './shell-env.mjs';
 
 const exec = promisify(execFile);
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const gitEnv = {
   ...process.env,
-  PATH: `${process.env.PATH ?? ''}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
+  PATH: currentPathWithFallbacks(),
   GIT_OPTIONAL_LOCKS: '0',
   GIT_TERMINAL_PROMPT: '0',
   GIT_LITERAL_PATHSPECS: '1',
 };
 
+// 只读取一次登录 shell 环境（约 1-2 秒）；后续 Git 调用直接复用。
+let environmentReady = null;
+
+export function initializeGitEnvironment() {
+  environmentReady ??= readLoginShellEnvironment()
+    .then((patch) => { Object.assign(gitEnv, patch); return gitEnv; })
+    .catch(() => gitEnv);
+  return environmentReady;
+}
+
 async function git(cwd, args, options = {}) {
+  await initializeGitEnvironment();
   try {
     const { input, ...execOptions } = options;
     const task = exec('git', ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-C', cwd, ...args], {
@@ -374,7 +386,7 @@ export async function performRepositoryAction(repository, action, payload = {}, 
         if (Buffer.byteLength(payload.message) > 65536) throw new Error('提交说明过长，请控制在 64 KB 以内。');
         if (current.files.some((file) => file.kind === 'conflict')) throw new Error('请先解决合并冲突并暂存，再提交。');
         if (!current.files.some((file) => file.staged) && !current.mergeInProgress) throw new Error('请先暂存需要提交的文件。');
-        await git(current.path, ['commit', '--file=-'], { input: payload.message.trim(), timeout: 120000 });
+        await git(current.path, ['commit', '--file=-'], { input: payload.message.trim(), timeout: 600000 });
         return '提交成功';
       }
       case 'pull':
@@ -394,7 +406,7 @@ export async function performRepositoryAction(repository, action, payload = {}, 
             });
             if (!saved.split('\n').includes(`password=${credentials.password}`)) throw new Error('Git 凭据存储没有保存成功，请检查凭据存储设置。');
           },
-          run: ({ config = [], env = {} } = {}) => git(current.path, [...config, ...args], { timeout: 120000, env: { ...gitEnv, ...env } }),
+          run: ({ config = [], env = {} } = {}) => git(current.path, [...config, ...args], { timeout: 600000, env: { ...gitEnv, ...env } }),
         });
         if (action === 'pull') {
           await runRemote(['pull', '--ff-only', '--no-rebase', '--', remote, target]);

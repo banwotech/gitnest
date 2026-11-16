@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { scanWorkspace, readComparison, readCommits, readCommitDetail, readCommitComparison, performRepositoryAction } from './git.mjs';
+import { scanWorkspace, readComparison, readCommits, readCommitDetail, readCommitComparison, performRepositoryAction, initializeGitEnvironment } from './git.mjs';
 import { AuthenticationCancelledError, validateCredentials } from './authentication.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -159,6 +159,8 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await loadSettings();
+  // 预热登录 shell 环境，避免首次扫描/提交时多等 1-2 秒。
+  initializeGitEnvironment().catch(() => {});
   registerHandlers();
   Menu.setApplicationMenu(Menu.buildFromTemplate([
   { label: 'GitNest', submenu: [{ role: 'about', label: '关于 GitNest' }, { type: 'separator' }, { role: 'hide', label: '隐藏 GitNest' }, { role: 'quit', label: '退出 GitNest' }] },
